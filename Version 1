@@ -1,0 +1,247 @@
+#This code is intended for testing purposes only and is not for commercial use. Please ensure its usage aligns with ethical and legal principles. 
+import csv
+import random
+import time
+import pickle  # For saving and loading the state
+from bs4 import BeautifulSoup
+from selenium import webdriver
+from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+import threading
+
+pause_flag = threading.Event()
+pause_flag.set()  # Start unpaused
+stop_flag = False  # If set to True, will stop the scraping process
+
+chrome_driver_path = r'C:\chromedriver-win64\chromedriver-win64\chromedriver.exe'
+chrome_options = webdriver.ChromeOptions()
+service = Service(executable_path=chrome_driver_path)
+driver = webdriver.Chrome(service=service, options=chrome_options)
+
+
+def login_to_linkedin(email, password):
+    """Function to log in to LinkedIn with email and password."""
+    print("Navigating to LinkedIn login page...")
+    driver.get('https://www.linkedin.com/login')
+
+    try:
+        WebDriverWait(driver, 20).until(EC.visibility_of_element_located((By.ID, 'username')))
+        print("Login page loaded.")
+    except Exception as e:
+        print("Login page not loaded properly.")
+        print(e)
+        return
+
+    try:
+        email_input = driver.find_element(By.ID, 'username')
+        email_input.send_keys(email)
+        print("Entered email.")
+    except Exception as e:
+        print("Failed to enter email.")
+        print(e)
+        return
+
+    try:
+        password_input = driver.find_element(By.ID, 'password')
+        password_input.send_keys(password)
+        print("Entered password.")
+    except Exception as e:
+        print("Failed to enter password.")
+        print(e)
+        return
+
+    try:
+        login_button = driver.find_element(By.XPATH, '//button[@type="submit"]')
+        login_button.click()
+        print("Clicked on login button.")
+    except Exception as e:
+        print("Failed to click login button.")
+        print(e)
+        return
+
+    try:
+        WebDriverWait(driver, 20).until(
+            EC.visibility_of_element_located((By.CSS_SELECTOR, 'input.search-global-typeahead__input')))
+        print("Logged in successfully.")
+    except Exception as e:
+        print("Login failed or requires manual intervention.")
+        print(e)
+
+
+def search_term(term):
+    """Function to search for a term on LinkedIn."""
+    try:
+        time.sleep(3)
+        search_bar = driver.find_element(By.CSS_SELECTOR, 'input.search-global-typeahead__input')
+        search_bar.send_keys(term)
+        search_bar.send_keys("\n")
+        print(f"Searching for term: {term}")
+        print("Please filter results manually. Waiting for 10 seconds...")
+        time.sleep(10)  # Wait for the user to filter manually~~~> Bare in your mind you have to filter the posts manually 
+    except Exception as e:
+        print("Search failed.")
+        print(e)
+
+
+def disable_images_and_videos():
+    """Inject JavaScript to block images and videos after the search."""
+    script = """
+    var styles = `
+        img { display: none !important; }
+        video { display: none !important; }
+        iframe { display: none !important; }
+    `;
+    var styleSheet = document.createElement("style");
+    styleSheet.type = "text/css";
+    styleSheet.innerText = styles;
+    document.head.appendChild(styleSheet);
+    console.log('Images and videos are disabled.');
+    """
+    driver.execute_script(script)
+    print("Images and videos have been disabled via JavaScript.")
+
+
+def save_state(scraped_posts):
+    """Function to save the state of the scraping process."""
+    with open('scraped_state.pkl', 'wb') as state_file:
+        pickle.dump(scraped_posts, state_file)
+    print("Scraped state saved.")
+
+
+def load_state():
+    """Function to load the previously saved state of the scraping process."""
+    try:
+        with open('scraped_state.pkl', 'rb') as state_file:
+            return pickle.load(state_file)
+    except FileNotFoundError:
+        return set()
+
+
+def pause_scraping():
+    """Function to pause the scraping process."""
+    pause_flag.clear()  # This will block the main scraping loop
+    print("Scraping paused. You can resume it later.")
+
+
+def resume_scraping():
+    """Function to resume the paused scraping process."""
+    pause_flag.set()  # This will unblock the main scraping loop
+    print("Scraping resumed.")
+
+def scrape_posts_in_batches(batch_size=450):
+    """Function to scrape LinkedIn posts in batches of a specified size."""
+    target_posts = 10000  # Define the total number of posts to load
+    all_posts = set()  # Set to store loaded posts before scraping
+    rate_limit_threshold = 450  # Number of posts to load before rate-limiting pause
+    total_scraped_posts = 0  # Track the total number of posts scraped
+
+    print(f"Attempting to load at least {target_posts} posts in batches of {batch_size} before scraping starts...")
+
+    batch_count = 0  # Keeps track of the number of batches scraped
+
+    # Open CSV file in append mode
+    with open('linkedin_posts.csv', 'a', newline='', encoding='utf-8') as file:
+        writer = csv.writer(file)
+        writer.writerow(['Post Content'])  # Write the header for the CSV file
+
+        # Scroll and load posts until we reach the total target post count
+        while len(all_posts) < target_posts:
+            # Check for pause
+            pause_flag.wait()  # This will pause the execution if the event is not set
+
+            if stop_flag:  # Check for stop signal
+                return  # Exit the function
+
+            try:
+                # Use JavaScript to simulate loading more posts instead of scrolling
+                driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+
+                # Minimal delay between scrolling actions to prevent overwhelming the server
+                time.sleep(random.uniform(0.1, 0.3))  # Introduce small delay
+
+                # Extract the posts on the page
+                posts = driver.find_elements(By.XPATH, '//div[contains(@class, "occludable-update")]')
+
+                for post in posts:
+                    # Extract the post's HTML source to avoid duplicates during scraping
+                    post_html = post.get_attribute('outerHTML')
+                    all_posts.add(post_html)  # Add post HTML to the set (avoids duplicates)
+
+                print(f"Loaded {len(all_posts)} posts so far.")
+
+                # Check if we have enough posts to process a batch
+                if len(all_posts) >= batch_size:
+                    # Scrape the current batch of posts
+                    posts_to_scrape = list(all_posts)[:batch_size]
+                    scrape_and_save_batch(posts_to_scrape, writer)
+                    batch_count += 1
+                    total_scraped_posts += batch_size
+                    print(f"Batch {batch_count} scraped and saved. Total scraped: {total_scraped_posts}")
+
+                    # Remove the scraped posts from the set
+                    all_posts = set(list(all_posts)[batch_size:])
+
+                    # Handling rate limits: pause after every `rate_limit_threshold` posts
+                    if total_scraped_posts % rate_limit_threshold == 0:
+                        print(f"Rate limit reached after {total_scraped_posts} posts. Pausing for 5 minutes...")
+                        time.sleep(300)  # Sleep for 5 minutes to avoid rate-limiting
+
+                # If no more new posts are loading, stop
+                if len(posts) == 0 and len(all_posts) < batch_size:
+                    break
+
+            except Exception as e:
+                print("Failed to load more posts.")
+                print(e)
+                break
+
+        # If any posts are left unsaved after the loop, save them
+        if len(all_posts) > 0:
+            scrape_and_save_batch(list(all_posts), writer)
+            print("Final batch scraped and saved.")
+
+    print("Scraping completed.")
+
+
+def scrape_and_save_batch(posts_batch, writer):
+    """Function to scrape and save a batch of LinkedIn posts."""
+    try:
+        for post_html in posts_batch:
+            try:
+                soup = BeautifulSoup(post_html, 'html.parser')
+
+                # Extract full text using BeautifulSoup
+                full_text = soup.find('div', class_='feed-shared-update-v2__description-wrapper')
+                if full_text is None:
+                    continue  
+
+                full_text_normalized = " ".join(full_text.get_text(separator=" ").strip().split())
+
+                print(f"Scraping post: {full_text_normalized[:100]}...")  # Log the first 100 characters of the post
+                writer.writerow([full_text_normalized])  # Write normalized post content to CSV
+
+            except Exception as e:
+                print("Failed to extract full post content with BeautifulSoup.")
+                print(e)
+    except Exception as e:
+        print("Error in processing batch.")
+        print(e)
+
+
+# Your LinkedIn credentials
+email = 'YOUR_EMAIL'  # Replace with your LinkedIn email
+password = 'YOUR_PASSWORD'  # Replace with your LinkedIn password
+
+login_to_linkedin(email, password)
+search_term('KEY_WORD')
+
+# After search, disable images and videos
+disable_images_and_videos()
+
+# Start scraping posts in batches of 500
+scrape_posts_in_batches(batch_size=450)
+
+# After termination, close the browser
+driver.quit()
